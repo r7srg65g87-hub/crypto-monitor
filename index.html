@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>实时涨跌幅排行榜</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="header">
+      <h1 class="logo">实时涨跌幅排行榜</h1>
+      <p class="tagline">代币市值、成交量、流动性 · 按涨跌幅排序</p>
+      <div class="toolbar glass-panel">
+        <input type="text" id="contract-input" class="input-add" placeholder="添加合约地址" autocomplete="off">
+        <button type="button" id="btn-add" class="btn-add">添加</button>
+        <div class="timeframe-tabs" role="tablist">
+          <button type="button" class="timeframe-tab" data-period="m5" role="tab">5m</button>
+          <button type="button" class="timeframe-tab active" data-period="h1" role="tab">1H</button>
+          <button type="button" class="timeframe-tab" data-period="h6" role="tab">6H</button>
+          <button type="button" class="timeframe-tab" data-period="h24" role="tab">24H</button>
+        </div>
+        <span class="live-indicator"><span class="live-dot" aria-hidden="true"></span> Live</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <div class="table-wrap glass-panel">
+        <div class="table-header" role="row">
+          <div class="cell-header cell-token">代币信息</div>
+          <div class="cell-header cell-price">当前价格</div>
+          <div class="cell-header cell-mc">市值 (MC/FDV)</div>
+          <div class="cell-header cell-vol">24h 成交量</div>
+          <div class="cell-header cell-liq">流动性</div>
+          <div class="cell-header cell-change" id="th-change">1H 涨跌幅</div>
+          <div class="cell-header cell-actions">操作</div>
+        </div>
+        <div class="table-body" id="table-body" role="rowgroup"></div>
+      </div>
+      <div id="empty-state" class="empty-state">暂无代币，请添加合约地址。</div>
+    </main>
+  </div>
+  <div id="toast" class="toast toast-hide" aria-live="polite">已复制</div>
+  <script src="script.js"></script>
+</body>
+</html>

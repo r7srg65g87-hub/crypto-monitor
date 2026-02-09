@@ -27,6 +27,8 @@
   let lastAlertedInfo = null;
   let alertHighlightTimer = null;
   let alertFloatingTimer = null;
+  let alertPanelInited = false;
+  let _cooldownMapCache = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -36,7 +38,10 @@
       if (raw) {
         const arr = JSON.parse(raw);
         if (Array.isArray(arr)) {
-          list = arr.filter((c) => c && typeof c === 'string').map((c) => ({ contract: normalizeAddress(c) }));
+          list = arr
+            .filter((c) => c && typeof c === 'string')
+            .map((c) => ({ contract: normalizeAddress(c) }))
+            .filter((p) => p.contract);
           return;
         }
       }
@@ -45,18 +50,101 @@
         try {
           const data = JSON.parse(legacy);
           if (data && Array.isArray(data.list)) {
-            list = data.list.filter((p) => p && p.contract).map((p) => ({ contract: normalizeAddress(p.contract) }));
+            list = data.list
+              .filter((p) => p && p.contract)
+              .map((p) => ({ contract: normalizeAddress(p.contract) }))
+              .filter((p) => p.contract);
             if (list.length > 0) saveData();
           }
         } catch (e) {}
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('loadData failed', e);
+    }
   }
 
   function saveData() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(list.map((p) => p.contract)));
-    } catch (e) {}
+    } catch (e) {
+      console.warn('saveData failed', e);
+    }
+  }
+
+  function exportConfig() {
+    try {
+      const alertSettings = loadAlertSettings();
+      const data = {
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        watchlist: list.map((p) => p.contract),
+        alertSettings: {
+          enabled: alertSettings.enabled,
+          sound: alertSettings.sound,
+          volume: alertSettings.volume,
+          mode: alertSettings.mode,
+          threshold: alertSettings.threshold,
+        },
+      };
+      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'meme-band-config-' + Date.now() + '.json';
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      showToast('导出失败');
+    }
+  }
+
+  function importConfig(file) {
+    if (!file || !file.type.includes('json')) {
+      showToast('请选择 .json 文件');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = function () {
+      try {
+        const raw = reader.result;
+        if (typeof raw !== 'string') {
+          showToast('文件格式错误');
+          return;
+        }
+        const data = JSON.parse(raw);
+        if (!data || typeof data !== 'object') {
+          showToast('无效的配置文件');
+          return;
+        }
+        const rawList = Array.isArray(data.watchlist)
+          ? data.watchlist.filter((c) => c && typeof c === 'string').map((c) => normalizeAddress(String(c))).filter((c) => c.length >= 20)
+          : [];
+        const seen = new Set();
+        list = rawList.filter((c) => {
+          if (seen.has(c)) return false;
+          seen.add(c);
+          return true;
+        }).map((c) => ({ contract: c }));
+        saveData();
+        if (data.alertSettings && typeof data.alertSettings === 'object') {
+          const s = data.alertSettings;
+          saveAlertSettings({
+            enabled: !!s.enabled,
+            sound: s.sound && SOUND_URLS[s.sound] ? s.sound : 'chime',
+            volume: Number.isFinite(s.volume) ? Math.max(0, Math.min(100, s.volume)) : 70,
+            mode: s.mode === 'loop' ? 'loop' : 'single',
+            threshold: (typeof s.threshold === 'number' && s.threshold > 0) ? Math.max(0.1, Math.min(1000, s.threshold)) : 5,
+          });
+        }
+        applyAlertSettingsToDOM(loadAlertSettings());
+        startPolling();
+        showToast('导入成功，已恢复监控列表');
+      } catch (e) {
+        showToast('导入失败：配置文件格式错误');
+      }
+    };
+    reader.onerror = () => showToast('读取文件失败');
+    reader.readAsText(file);
   }
 
   function loadAlertSettings() {
@@ -67,7 +155,7 @@
         return {
           enabled: !!o.enabled,
           sound: o.sound && SOUND_URLS[o.sound] ? o.sound : 'chime',
-          volume: typeof o.volume === 'number' ? Math.max(0, Math.min(100, o.volume)) : 70,
+          volume: Number.isFinite(Number(o.volume)) ? Math.max(0, Math.min(100, Number(o.volume))) : 70,
           mode: o.mode === 'loop' ? 'loop' : 'single',
           threshold: (typeof o.threshold === 'number' && o.threshold > 0) ? Math.max(0.1, Math.min(1000, o.threshold)) : 5,
         };
@@ -105,8 +193,8 @@
     saveAlertCooldowns(map);
   }
 
-  function isInCooldown(ca) {
-    const map = loadAlertCooldowns();
+  function isInCooldown(ca, mapOverride) {
+    const map = mapOverride != null ? mapOverride : loadAlertCooldowns();
     const t = map[ca];
     if (!t) return false;
     return Date.now() - t < ALERT_COOLDOWN_MS;
@@ -199,7 +287,7 @@
   function addItem(addr) {
     const n = normalizeAddress(addr);
     if (!n || n.length < 20) return false;
-    if (list.some((p) => p.contract === n)) return true;
+    if (list.some((p) => p.contract === n)) return 'duplicate';
     list.push({ contract: n });
     saveData();
     return true;
@@ -243,12 +331,26 @@
     if (priceUsd == null || priceUsd === '') return '—';
     const n = parseFloat(priceUsd);
     if (isNaN(n)) return '—';
+    if (n <= 0) return '$0.000000';
     if (n >= 100) return '$' + n.toFixed(2);
-    if (n >= 1) return '$' + n.toFixed(4);
+    if (n >= 1) return '$' + n.toFixed(6);
     if (n >= 0.0001) return '$' + n.toFixed(6);
-    if (n >= 0.000001) return '$' + n.toFixed(8);
-    if (n > 0) return '$' + n.toExponential(4);
-    return '$0';
+    if (n < 0.0001) {
+      const exp = Math.floor(Math.log10(n));
+      const zeros = -exp - 1;
+      const mantissa = n * Math.pow(10, -exp);
+      const sig = mantissa.toFixed(4).replace('.', '').replace(/^0+/, '').slice(0, 6);
+      return '$0.0<sub>' + zeros + '</sub>' + sig;
+    }
+    return '$0.000000';
+  }
+
+  function getThermClass(v) {
+    if (v == null || !Number.isFinite(v) || v < 0) return 'therm-cool';
+    if (v >= 1e6) return 'therm-hot';
+    if (v >= 1e5) return 'therm-warm';
+    if (v >= 1e4) return 'therm-mid';
+    return 'therm-cool';
   }
 
   function formatShortMoney(v) {
@@ -284,6 +386,12 @@
     const div = document.createElement('div');
     div.textContent = s;
     return div.innerHTML;
+  }
+
+  function extractTicker(name) {
+    if (!name || typeof name !== 'string') return '—';
+    const m = name.match(/\(([^)]+)\)/);
+    return m ? m[1] : name;
   }
 
   async function fetchTokenData(contract) {
@@ -324,9 +432,15 @@
 
   function buildRowHtml(item, data) {
     const priceStr = data ? formatPrice(data.priceUsd) : '—';
-    const mcStr = data && data.fdv != null ? formatShortMoney(data.fdv) : '—';
-    const volStr = data && data.volumeH24 != null ? formatShortMoney(data.volumeH24) : '—';
-    const liqStr = data && data.liquidityUsd != null ? formatShortMoney(data.liquidityUsd) : '—';
+    const mcVal = data && data.fdv != null ? data.fdv : null;
+    const volVal = data && data.volumeH24 != null ? data.volumeH24 : null;
+    const liqVal = data && data.liquidityUsd != null ? data.liquidityUsd : null;
+    const mcStr = mcVal != null ? formatShortMoney(mcVal) : '—';
+    const volStr = volVal != null ? formatShortMoney(volVal) : '—';
+    const liqStr = liqVal != null ? formatShortMoney(liqVal) : '—';
+    const mcTherm = getThermClass(mcVal);
+    const volTherm = getThermClass(volVal);
+    const liqTherm = getThermClass(liqVal);
     const changeVal = data ? getChangeValue(data, selectedPeriod) : null;
     const changeCls = changeClass(changeVal);
     const changeStr = changeText(changeVal);
@@ -342,10 +456,11 @@
       : '';
     const contractKey = (item.contract || '').trim() || '';
     const caNorm = normalizeAddress(contractKey);
-    const inCooldown = caNorm && isInCooldown(caNorm);
+    const inCooldown = caNorm && isInCooldown(caNorm, _cooldownMapCache);
     const bellClass = inCooldown ? 'alert-bell in-cooldown' : 'alert-bell';
     const bellHtml = '<span class="' + bellClass + '" title="' + (inCooldown ? '预警冷却中' : '') + '">🔔</span>';
-    const name = data ? data.name + ' (' + data.symbol + ')' : '—';
+    const fullName = data ? data.name + ' (' + data.symbol + ')' : '—';
+    const ticker = extractTicker(fullName);
     const addrShort = shortAddress(contractKey);
     const gmgnUrl = data ? getGmgnUrl(data.chainId, contractKey) : '#';
 
@@ -363,15 +478,21 @@
           <div class="cell-token-inner">
             ${imgHtml}
             <div class="token-info">
-              <div class="token-name-row">${bellHtml}${chainBadge}<span class="token-name">${escapeHtml(name)}</span></div>
-              <div class="token-address">${escapeHtml(addrShort)}</div>
+              <div class="token-ticker-row">
+                <span class="token-ticker">${escapeHtml(ticker)}</span>
+                ${bellHtml}
+              </div>
+              <div class="token-meta-row">
+                ${chainBadge}
+                <span class="token-address">${escapeHtml(addrShort)}</span>
+              </div>
             </div>
           </div>
         </div>
-        <div class="cell cell-price">${escapeHtml(priceStr)}</div>
-        <div class="cell cell-mc">${escapeHtml(mcStr)}</div>
-        <div class="cell cell-vol">${escapeHtml(volStr)}</div>
-        <div class="cell cell-liq">${escapeHtml(liqStr)}</div>
+        <div class="cell cell-price">${priceStr}</div>
+        <div class="cell cell-mc ${mcTherm}">${escapeHtml(mcStr)}</div>
+        <div class="cell cell-vol ${volTherm}">${escapeHtml(volStr)}</div>
+        <div class="cell cell-liq ${liqTherm}">${escapeHtml(liqStr)}</div>
         <div class="cell cell-change"><span class="change-badge ${changeCls}">${escapeHtml(changeStr)}</span></div>
         <div class="cell cell-actions">
           <button type="button" class="btn-icon btn-copy" data-contract="${escapeHtml(contractKey)}" title="复制地址">📋</button>
@@ -401,7 +522,10 @@
     const emptyEl = $('empty-state');
     if (!container) return;
 
+    _cooldownMapCache = loadAlertCooldowns();
+
     if (list.length === 0) {
+      _cooldownMapCache = null;
       if (pollTimer) {
         clearInterval(pollTimer);
         pollTimer = null;
@@ -430,7 +554,7 @@
     const withData = list.map((item) => ({ item, data: results[item.contract] || null }));
     const sorted = withData.slice().sort(sortRows);
 
-    const alerted = checkAndTriggerAlerts(results);
+    const alerted = checkAndTriggerAlerts(results, _cooldownMapCache);
 
     container.innerHTML = sorted.map(({ item }) => buildRowHtml(item, results[item.contract] || null)).join('');
     if (emptyEl) emptyEl.classList.add('hidden');
@@ -470,9 +594,10 @@
         }
       }
     }
+    _cooldownMapCache = null;
   }
 
-  function checkAndTriggerAlerts(results) {
+  function checkAndTriggerAlerts(results, mapOverride) {
     const settings = loadAlertSettings();
     if (!settings.enabled) return null;
     const mode = settings.mode === 'loop';
@@ -489,8 +614,9 @@
       if (abs < threshold) continue;
       const ca = normalizeAddress(item.contract);
       if (!ca) continue;
-      if (isInCooldown(ca)) continue;
+      if (isInCooldown(ca, mapOverride)) continue;
       setCooldown(ca);
+      if (mapOverride) mapOverride[ca] = Date.now();
       const direction = m5Val >= 0 ? 'up' : 'down';
       lastAlertedInfo = { contract: ca, name: data.name, symbol: data.symbol, m5: m5Val, direction, timestamp: Date.now() };
       if (alertHighlightTimer) clearTimeout(alertHighlightTimer);
@@ -554,24 +680,50 @@
 
     window.clearAll = function () {
       localStorage.removeItem(STORAGE_KEY);
+      localStorage.removeItem(ALERT_SETTINGS_KEY);
+      localStorage.removeItem(ALERT_COOLDOWN_KEY);
       localStorage.removeItem('watchlist_v2');
+      localStorage.removeItem('crypto-monitor-data');
       location.reload();
     };
 
     const contractInput = $('contract-input');
     const btnAdd = $('btn-add');
+    const btnExport = $('btn-export');
+    const btnImport = $('btn-import');
+    const importFileInput = $('import-file');
     if (btnAdd && contractInput) {
       btnAdd.addEventListener('click', () => {
-        if (addItem(contractInput.value)) {
+        const result = addItem(contractInput.value);
+        if (result === true) {
           contractInput.value = '';
           startPolling();
+        } else if (result === 'duplicate') {
+          showToast('该地址已在列表中');
+        } else {
+          showToast('请输入有效的合约地址');
         }
       });
       contractInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' && addItem(contractInput.value)) {
+        if (e.key !== 'Enter') return;
+        const result = addItem(contractInput.value);
+        if (result === true) {
           contractInput.value = '';
           startPolling();
+        } else if (result === 'duplicate') {
+          showToast('该地址已在列表中');
+        } else {
+          showToast('请输入有效的合约地址');
         }
+      });
+    }
+    if (btnExport) btnExport.addEventListener('click', exportConfig);
+    if (btnImport && importFileInput) {
+      btnImport.addEventListener('click', () => importFileInput.click());
+      importFileInput.addEventListener('change', (e) => {
+        const file = e.target.files && e.target.files[0];
+        if (file) importConfig(file);
+        e.target.value = '';
       });
     }
 
@@ -584,6 +736,7 @@
         tab.classList.add('active');
         updateChangeHeader();
         if (list.length > 0 && Object.keys(lastResults).length > 0) {
+          _cooldownMapCache = loadAlertCooldowns();
           const withData = list.map((item) => ({ item, data: lastResults[item.contract] || null }));
           const sorted = withData.slice().sort(sortRows);
           const container = $('table-body');
@@ -591,6 +744,7 @@
             container.innerHTML = sorted.map(({ item }) => buildRowHtml(item, lastResults[item.contract] || null)).join('');
             bindRowListeners(container);
           }
+          _cooldownMapCache = null;
         } else {
           refresh();
         }
@@ -602,7 +756,29 @@
     startPolling();
   }
 
+  function applyAlertSettingsToDOM(settings) {
+    const s = settings || loadAlertSettings();
+    const cb = $('alert-enabled');
+    const thr = $('alert-threshold');
+    const sel = $('alert-sound');
+    const vol = $('alert-volume');
+    const singleBtn = $('alert-mode-single');
+    const loopBtn = $('alert-mode-loop');
+    if (cb) cb.checked = s.enabled;
+    if (thr) thr.value = s.threshold;
+    if (sel) sel.value = s.sound;
+    if (vol) vol.value = s.volume;
+    document.querySelectorAll('.alert-mode-btn').forEach((b) => b.classList.remove('active'));
+    if (s.mode === 'loop' && loopBtn) loopBtn.classList.add('active');
+    else if (singleBtn) singleBtn.classList.add('active');
+  }
+
   function initAlertPanel() {
+    if (alertPanelInited) {
+      applyAlertSettingsToDOM(loadAlertSettings());
+      return;
+    }
+    alertPanelInited = true;
     const settings = loadAlertSettings();
     const cb = $('alert-enabled');
     const thr = $('alert-threshold');

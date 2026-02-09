@@ -18,6 +18,9 @@
       <div class="toolbar control-bar">
         <input type="text" id="contract-input" class="input-add" placeholder="添加合约地址" autocomplete="off">
         <button type="button" id="btn-add" class="btn-add">添加</button>
+        <button type="button" id="btn-export" class="btn-icon btn-export" title="导出配置">⬇️</button>
+        <button type="button" id="btn-import" class="btn-icon btn-import" title="导入配置">⬆️</button>
+        <input type="file" id="import-file" accept=".json" style="display:none">
         <div class="timeframe-tabs" role="tablist">
           <button type="button" class="timeframe-tab" data-period="m5" role="tab">5m</button>
           <button type="button" class="timeframe-tab active" data-period="h1" role="tab">1H</button>

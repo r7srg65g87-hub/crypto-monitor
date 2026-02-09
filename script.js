@@ -193,8 +193,10 @@
     const imgHtml = imgSrc
       ? `<img class="token-icon" src="${escapeHtml(imgSrc)}" alt="" onerror="this.style.display='none'">`
       : '<span class="token-icon"></span>';
+    const chainId = data && data.chainId ? String(data.chainId).toLowerCase() : '';
+    const chainTagClass = chainId === 'bsc' ? 'tag-bsc' : chainId === 'solana' ? 'tag-solana' : chainId === 'base' ? 'tag-base' : '';
     const chainBadge = data && data.chainId
-      ? `<span class="chain-badge">${escapeHtml(String(data.chainId).toUpperCase())}</span>`
+      ? `<span class="chain-badge ${chainTagClass}">${escapeHtml(String(data.chainId).toUpperCase())}</span>`
       : '';
     const name = data ? data.name + ' (' + data.symbol + ')' : '—';
     const contractKey = (item.contract || '').trim() || '';

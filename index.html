@@ -6,15 +6,17 @@
   <title>实时涨跌幅排行榜</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Roboto+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="app">
     <header class="header">
-      <h1 class="logo">实时涨跌幅排行榜</h1>
-      <p class="tagline">代币市值、成交量、流动性 · 按涨跌幅排序</p>
-      <div class="toolbar glass-panel">
+      <div class="header-title-block">
+        <h1 class="logo">实时涨跌幅排行榜</h1>
+        <p class="tagline">代币市值、成交量、流动性 · 按涨跌幅排序</p>
+      </div>
+      <div class="toolbar control-bar">
         <input type="text" id="contract-input" class="input-add" placeholder="添加合约地址" autocomplete="off">
         <button type="button" id="btn-add" class="btn-add">添加</button>
         <div class="timeframe-tabs" role="tablist">

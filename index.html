@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>实时涨跌幅排行榜</title>
+  <title>Meme波段利器V1.0</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
@@ -13,8 +13,7 @@
   <div class="app">
     <header class="header">
       <div class="header-title-block">
-        <h1 class="logo">实时涨跌幅排行榜</h1>
-        <p class="tagline">代币市值、成交量、流动性 · 按涨跌幅排序</p>
+        <h1 class="logo">Meme波段利器V1.0</h1>
       </div>
       <div class="toolbar control-bar">
         <input type="text" id="contract-input" class="input-add" placeholder="添加合约地址" autocomplete="off">
@@ -24,6 +23,32 @@
           <button type="button" class="timeframe-tab active" data-period="h1" role="tab">1H</button>
           <button type="button" class="timeframe-tab" data-period="h6" role="tab">6H</button>
           <button type="button" class="timeframe-tab" data-period="h24" role="tab">24H</button>
+        </div>
+        <div class="alert-settings-panel">
+          <label class="alert-toggle-label">
+            <input type="checkbox" id="alert-enabled" class="alert-checkbox">
+            <span class="alert-toggle-text">预警</span>
+          </label>
+          <div class="alert-threshold-wrap">
+            <span class="alert-threshold-label">阈值</span>
+            <input type="number" id="alert-threshold" class="alert-threshold" min="0.1" step="0.5" value="5" inputmode="decimal">
+            <span class="alert-threshold-unit">%</span>
+          </div>
+          <select id="alert-sound" class="alert-select">
+            <option value="chime">Chime</option>
+            <option value="bibo">Bibo</option>
+            <option value="alert">Alert</option>
+            <option value="sonar">Sonar</option>
+          </select>
+          <div class="alert-volume-wrap">
+            <span class="alert-volume-label">音量</span>
+            <input type="range" id="alert-volume" class="alert-volume" min="0" max="100" value="70">
+          </div>
+          <div class="alert-mode-wrap">
+            <button type="button" id="alert-mode-single" class="alert-mode-btn active" data-mode="single">单次</button>
+            <button type="button" id="alert-mode-loop" class="alert-mode-btn" data-mode="loop">循环</button>
+          </div>
+          <button type="button" id="alert-test" class="alert-test-btn" title="试听">🔊</button>
         </div>
         <span class="live-indicator"><span class="live-dot" aria-hidden="true"></span> Live</span>
       </div>
@@ -46,6 +71,13 @@
     </main>
   </div>
   <div id="toast" class="toast toast-hide" aria-live="polite">已复制</div>
+  <div id="alert-stop-wrap" class="alert-stop-wrap hidden">
+    <button type="button" id="alert-stop-btn" class="alert-stop-btn">停止报警</button>
+  </div>
+  <div id="alert-floating-box" class="alert-floating-box hidden">
+    <span id="alert-floating-text"></span>
+    <button type="button" id="alert-floating-goto" class="alert-floating-goto">定位到该行</button>
+  </div>
   <script src="script.js"></script>
 </body>
 </html>

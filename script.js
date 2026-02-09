@@ -4,6 +4,16 @@
   const DEX_API = 'https://api.dexscreener.com/latest/dex/tokens/';
   const POLL_INTERVAL_MS = 3000;
   const STORAGE_KEY = 'crypto-monitor-watchlist';
+  const ALERT_SETTINGS_KEY = 'crypto-monitor-alert-settings';
+  const ALERT_COOLDOWN_KEY = 'crypto-monitor-alert-cooldown';
+  const ALERT_COOLDOWN_MS = 30 * 60 * 1000;
+
+  const SOUND_URLS = {
+    chime: 'https://assets.mixkit.co/active_storage/sfx/2869/2869-preview.mp3',
+    bibo: 'https://assets.mixkit.co/active_storage/sfx/2568/2568-preview.mp3',
+    alert: 'https://assets.mixkit.co/active_storage/sfx/951/951-preview.mp3',
+    sonar: 'https://assets.mixkit.co/active_storage/sfx/1103/1103-preview.mp3',
+  };
 
   const PERIODS = ['m5', 'h1', 'h6', 'h24'];
   const PERIOD_LABELS = { m5: '5m', h1: '1H', h6: '6H', h24: '24H' };
@@ -12,6 +22,11 @@
   let pollTimer = null;
   let selectedPeriod = 'h1';
   let lastResults = {};
+  let currentAlertAudio = null;
+  let alertLoopActive = false;
+  let lastAlertedInfo = null;
+  let alertHighlightTimer = null;
+  let alertFloatingTimer = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -42,6 +57,133 @@
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(list.map((p) => p.contract)));
     } catch (e) {}
+  }
+
+  function loadAlertSettings() {
+    try {
+      const raw = localStorage.getItem(ALERT_SETTINGS_KEY);
+      if (raw) {
+        const o = JSON.parse(raw);
+        return {
+          enabled: !!o.enabled,
+          sound: o.sound && SOUND_URLS[o.sound] ? o.sound : 'chime',
+          volume: typeof o.volume === 'number' ? Math.max(0, Math.min(100, o.volume)) : 70,
+          mode: o.mode === 'loop' ? 'loop' : 'single',
+          threshold: (typeof o.threshold === 'number' && o.threshold > 0) ? Math.max(0.1, Math.min(1000, o.threshold)) : 5,
+        };
+      }
+    } catch (e) {}
+    return { enabled: false, sound: 'chime', volume: 70, mode: 'single', threshold: 5 };
+  }
+
+  function saveAlertSettings(s) {
+    try {
+      localStorage.setItem(ALERT_SETTINGS_KEY, JSON.stringify(s));
+    } catch (e) {}
+  }
+
+  function loadAlertCooldowns() {
+    try {
+      const raw = localStorage.getItem(ALERT_COOLDOWN_KEY);
+      if (raw) {
+        const o = JSON.parse(raw);
+        return typeof o === 'object' && o !== null ? o : {};
+      }
+    } catch (e) {}
+    return {};
+  }
+
+  function saveAlertCooldowns(map) {
+    try {
+      localStorage.setItem(ALERT_COOLDOWN_KEY, JSON.stringify(map));
+    } catch (e) {}
+  }
+
+  function setCooldown(ca) {
+    const map = loadAlertCooldowns();
+    map[ca] = Date.now();
+    saveAlertCooldowns(map);
+  }
+
+  function isInCooldown(ca) {
+    const map = loadAlertCooldowns();
+    const t = map[ca];
+    if (!t) return false;
+    return Date.now() - t < ALERT_COOLDOWN_MS;
+  }
+
+  function playAlertSound(settings, isLoop) {
+    if (currentAlertAudio) {
+      try {
+        currentAlertAudio.pause();
+        currentAlertAudio.currentTime = 0;
+      } catch (e) {}
+    }
+    const url = SOUND_URLS[settings.sound] || SOUND_URLS.chime;
+    const audio = new Audio(url);
+    audio.volume = (settings.volume || 70) / 100;
+    currentAlertAudio = audio;
+    if (isLoop) {
+      alertLoopActive = true;
+      const stopWrap = $('alert-stop-wrap');
+      if (stopWrap) stopWrap.classList.remove('hidden');
+      const onEnded = () => {
+        if (alertLoopActive && currentAlertAudio === audio) {
+          audio.currentTime = 0;
+          audio.play().catch(() => {});
+        }
+      };
+      audio.addEventListener('ended', onEnded);
+    }
+    audio.play().catch(() => {});
+  }
+
+  function stopAlertSound() {
+    alertLoopActive = false;
+    if (currentAlertAudio) {
+      try {
+        currentAlertAudio.pause();
+        currentAlertAudio.currentTime = 0;
+      } catch (e) {}
+      currentAlertAudio = null;
+    }
+    const stopWrap = $('alert-stop-wrap');
+    if (stopWrap) stopWrap.classList.add('hidden');
+  }
+
+  function requestNotificationPermission() {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {});
+    }
+  }
+
+  function showDesktopNotification(title, body) {
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    try {
+      const n = new Notification(title, { body });
+      setTimeout(() => n.close(), 5000);
+    } catch (e) {}
+  }
+
+  function clearAlertHighlight() {
+    lastAlertedInfo = null;
+    if (alertHighlightTimer) {
+      clearTimeout(alertHighlightTimer);
+      alertHighlightTimer = null;
+    }
+    const container = $('table-body');
+    if (container) {
+      container.querySelectorAll('.token-row.alert-highlight-up, .token-row.alert-highlight-down').forEach((row) => {
+        row.classList.remove('alert-highlight-up', 'alert-highlight-down');
+      });
+    }
+    const fb = $('alert-floating-box');
+    if (fb) fb.classList.add('hidden');
+    if (alertFloatingTimer) {
+      clearTimeout(alertFloatingTimer);
+      alertFloatingTimer = null;
+    }
   }
 
   function normalizeAddress(addr) {
@@ -198,18 +340,30 @@
     const chainBadge = data && data.chainId
       ? `<span class="chain-badge ${chainTagClass}">${escapeHtml(String(data.chainId).toUpperCase())}</span>`
       : '';
-    const name = data ? data.name + ' (' + data.symbol + ')' : '—';
     const contractKey = (item.contract || '').trim() || '';
+    const caNorm = normalizeAddress(contractKey);
+    const inCooldown = caNorm && isInCooldown(caNorm);
+    const bellClass = inCooldown ? 'alert-bell in-cooldown' : 'alert-bell';
+    const bellHtml = '<span class="' + bellClass + '" title="' + (inCooldown ? '预警冷却中' : '') + '">🔔</span>';
+    const name = data ? data.name + ' (' + data.symbol + ')' : '—';
     const addrShort = shortAddress(contractKey);
     const gmgnUrl = data ? getGmgnUrl(data.chainId, contractKey) : '#';
 
+    let rowClass = 'token-row';
+    if (lastAlertedInfo && lastAlertedInfo.contract === caNorm) {
+      const elapsed = Date.now() - lastAlertedInfo.timestamp;
+      if (elapsed < 30000) {
+        rowClass += lastAlertedInfo.direction === 'up' ? ' alert-highlight-up' : ' alert-highlight-down';
+      }
+    }
+
     return `
-      <div class="token-row" data-contract="${escapeHtml(contractKey)}" role="row">
+      <div class="${rowClass}" data-contract="${escapeHtml(contractKey)}" role="row">
         <div class="cell cell-token">
           <div class="cell-token-inner">
             ${imgHtml}
             <div class="token-info">
-              <div class="token-name-row">${chainBadge}<span class="token-name">${escapeHtml(name)}</span></div>
+              <div class="token-name-row">${bellHtml}${chainBadge}<span class="token-name">${escapeHtml(name)}</span></div>
               <div class="token-address">${escapeHtml(addrShort)}</div>
             </div>
           </div>
@@ -254,6 +408,7 @@
       }
       container.innerHTML = '';
       if (emptyEl) emptyEl.classList.remove('hidden');
+      clearAlertHighlight();
       return;
     }
 
@@ -275,13 +430,96 @@
     const withData = list.map((item) => ({ item, data: results[item.contract] || null }));
     const sorted = withData.slice().sort(sortRows);
 
+    const alerted = checkAndTriggerAlerts(results);
+
     container.innerHTML = sorted.map(({ item }) => buildRowHtml(item, results[item.contract] || null)).join('');
     if (emptyEl) emptyEl.classList.add('hidden');
     bindRowListeners(container);
+
+    if (alerted) {
+      const row = Array.from(container.querySelectorAll('.token-row')).find(
+        (r) => normalizeAddress(r.dataset.contract || '') === alerted.contract
+      );
+      if (row) {
+        const rect = row.getBoundingClientRect();
+        const inView = rect.top >= 0 && rect.bottom <= (window.innerHeight || document.documentElement.clientHeight);
+        if (!inView) {
+          const fb = $('alert-floating-box');
+          const fbt = $('alert-floating-text');
+          const fbg = $('alert-floating-goto');
+          if (fb && fbt) {
+            fbt.textContent = (alerted.direction === 'up' ? '🚀 ' : '⚠️ ') + (alerted.name || alerted.symbol || '代币') + ' 5分钟' + (alerted.direction === 'up' ? '暴涨' : '暴跌') + ' ' + (alerted.m5 >= 0 ? '+' : '') + alerted.m5.toFixed(1) + '%';
+            fb.classList.remove('hidden');
+            if (alertFloatingTimer) clearTimeout(alertFloatingTimer);
+            alertFloatingTimer = setTimeout(() => {
+              fb.classList.add('hidden');
+              alertFloatingTimer = null;
+            }, 30000);
+          }
+          if (fbg) {
+            const contractToScroll = alerted.contract;
+            fbg.onclick = () => {
+              const c = $('table-body');
+              const targetRow = c ? Array.from(c.querySelectorAll('.token-row')).find(
+                (r) => normalizeAddress(r.dataset.contract || '') === contractToScroll
+              ) : null;
+              if (targetRow) targetRow.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              clearAlertHighlight();
+            };
+          }
+        }
+      }
+    }
+  }
+
+  function checkAndTriggerAlerts(results) {
+    const settings = loadAlertSettings();
+    if (!settings.enabled) return null;
+    const mode = settings.mode === 'loop';
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
+      const data = results[item.contract];
+      if (!data) continue;
+      const m5 = data.changeM5;
+      if (m5 == null || isNaN(parseFloat(m5))) continue;
+      const m5Val = parseFloat(m5);
+      const abs = Math.abs(m5Val);
+      const rawThr = parseFloat(settings.threshold);
+      const threshold = (Number.isFinite(rawThr) && rawThr > 0) ? Math.max(0.1, Math.min(1000, rawThr)) : Infinity;
+      if (abs < threshold) continue;
+      const ca = normalizeAddress(item.contract);
+      if (!ca) continue;
+      if (isInCooldown(ca)) continue;
+      setCooldown(ca);
+      const direction = m5Val >= 0 ? 'up' : 'down';
+      lastAlertedInfo = { contract: ca, name: data.name, symbol: data.symbol, m5: m5Val, direction, timestamp: Date.now() };
+      if (alertHighlightTimer) clearTimeout(alertHighlightTimer);
+      alertHighlightTimer = setTimeout(clearAlertHighlight, 30000);
+      playAlertSound(settings, mode);
+      const title = direction === 'up' ? '🚀 5分钟暴涨' : '⚠️ 5分钟暴跌';
+      const label = (data.name || data.symbol || '代币') + ' (' + (data.symbol || '') + ')';
+      const body = direction === 'up'
+        ? label + ' 5分钟暴涨 ' + m5Val.toFixed(1) + '%！'
+        : label + ' 5分钟暴跌 ' + m5Val.toFixed(1) + '%！';
+      showDesktopNotification(title, body);
+      return lastAlertedInfo;
+    }
+    return null;
+  }
+
+  function onTableBodyClick(e) {
+    const row = e.target.closest('.token-row');
+    if (!row) return;
+    if (e.target.closest('.btn-remove, .btn-icon, .btn-link, a')) return;
+    if (row.classList.contains('alert-highlight-up') || row.classList.contains('alert-highlight-down')) {
+      clearAlertHighlight();
+    }
   }
 
   function bindRowListeners(container) {
     if (!container) return;
+    container.removeEventListener('click', onTableBodyClick);
+    container.addEventListener('click', onTableBodyClick);
     container.querySelectorAll('.btn-remove').forEach((btn) => {
       btn.onclick = () => {
         const addr = (btn.dataset.contract || '').trim();
@@ -359,7 +597,88 @@
       });
     });
 
+    initAlertPanel();
+    requestNotificationPermission();
     startPolling();
+  }
+
+  function initAlertPanel() {
+    const settings = loadAlertSettings();
+    const cb = $('alert-enabled');
+    const thr = $('alert-threshold');
+    const sel = $('alert-sound');
+    const vol = $('alert-volume');
+    const singleBtn = $('alert-mode-single');
+    const loopBtn = $('alert-mode-loop');
+    const testBtn = $('alert-test');
+    const stopBtn = $('alert-stop-btn');
+
+    if (cb) cb.checked = settings.enabled;
+    if (thr) thr.value = settings.threshold;
+    if (sel) sel.value = settings.sound;
+    if (vol) vol.value = settings.volume;
+
+    document.querySelectorAll('.alert-mode-btn').forEach((b) => b.classList.remove('active'));
+    if (settings.mode === 'loop' && loopBtn) loopBtn.classList.add('active');
+    else if (singleBtn) singleBtn.classList.add('active');
+
+    function getValidThreshold() {
+      const v = thr ? parseFloat(String(thr.value).replace(/[^\d.]/g, '')) : 5;
+      return Number.isFinite(v) && v > 0 ? Math.max(0.1, Math.min(1000, v)) : 5;
+    }
+
+    function persist() {
+      const volNum = vol ? parseInt(vol.value, 10) : 70;
+      saveAlertSettings({
+        enabled: cb ? cb.checked : false,
+        sound: sel ? sel.value : 'chime',
+        volume: Number.isFinite(volNum) ? Math.max(0, Math.min(100, volNum)) : 70,
+        mode: loopBtn && loopBtn.classList.contains('active') ? 'loop' : 'single',
+        threshold: getValidThreshold(),
+      });
+    }
+
+    if (cb) cb.addEventListener('change', persist);
+    if (thr) {
+      thr.addEventListener('input', () => {
+        const v = String(thr.value).replace(/[^\d.]/g, '');
+        if (thr.value !== v) thr.value = v;
+        persist();
+      });
+      thr.addEventListener('change', () => {
+        const v = getValidThreshold();
+        thr.value = v;
+        persist();
+      });
+    }
+    if (sel) sel.addEventListener('change', persist);
+    if (vol) vol.addEventListener('input', persist);
+
+    if (singleBtn) {
+      singleBtn.addEventListener('click', () => {
+        document.querySelectorAll('.alert-mode-btn').forEach((b) => b.classList.remove('active'));
+        singleBtn.classList.add('active');
+        persist();
+      });
+    }
+    if (loopBtn) {
+      loopBtn.addEventListener('click', () => {
+        document.querySelectorAll('.alert-mode-btn').forEach((b) => b.classList.remove('active'));
+        loopBtn.classList.add('active');
+        persist();
+      });
+    }
+
+    if (testBtn) {
+      testBtn.addEventListener('click', () => {
+        const s = loadAlertSettings();
+        playAlertSound(s, false);
+      });
+    }
+
+    if (stopBtn) {
+      stopBtn.addEventListener('click', stopAlertSound);
+    }
   }
 
   if (document.readyState === 'loading') {

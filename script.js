@@ -29,6 +29,7 @@
   let alertFloatingTimer = null;
   let alertPanelInited = false;
   let _cooldownMapCache = null;
+  let _refreshing = false;
 
   const $ = (id) => document.getElementById(id);
 
@@ -92,14 +93,16 @@
       a.href = url;
       a.download = 'meme-band-config-' + Date.now() + '.json';
       a.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => URL.revokeObjectURL(url), 100);
     } catch (e) {
       showToast('导出失败');
     }
   }
 
   function importConfig(file) {
-    if (!file || !file.type.includes('json')) {
+    if (!file) return;
+    const isJson = file.type && (file.type.includes('json') || file.type === 'text/plain') || /\.json$/i.test(file.name || '');
+    if (!isJson) {
       showToast('请选择 .json 文件');
       return;
     }
@@ -128,12 +131,14 @@
         saveData();
         if (data.alertSettings && typeof data.alertSettings === 'object') {
           const s = data.alertSettings;
+          const thresholdRaw = parseFloat(s.threshold);
+          const thresholdVal = (Number.isFinite(thresholdRaw) && thresholdRaw > 0) ? Math.max(0.1, Math.min(1000, thresholdRaw)) : 5;
           saveAlertSettings({
             enabled: !!s.enabled,
             sound: s.sound && SOUND_URLS[s.sound] ? s.sound : 'chime',
-            volume: Number.isFinite(s.volume) ? Math.max(0, Math.min(100, s.volume)) : 70,
+            volume: Number.isFinite(Number(s.volume)) ? Math.max(0, Math.min(100, Number(s.volume))) : 70,
             mode: s.mode === 'loop' ? 'loop' : 'single',
-            threshold: (typeof s.threshold === 'number' && s.threshold > 0) ? Math.max(0.1, Math.min(1000, s.threshold)) : 5,
+            threshold: thresholdVal,
           });
         }
         applyAlertSettingsToDOM(loadAlertSettings());
@@ -252,6 +257,42 @@
       const n = new Notification(title, { body });
       setTimeout(() => n.close(), 5000);
     } catch (e) {}
+  }
+
+  function showNotificationBanner(tokenData, priceChange) {
+    const container = $('alert-banner-container');
+    if (!container) return;
+    const isSurge = priceChange >= 0;
+    const cls = isSurge ? 'alert-banner surge' : 'alert-banner drop';
+    const chainId = (tokenData.chainId || '').toLowerCase();
+    const chainTagClass = chainId === 'bsc' ? 'tag-bsc' : chainId === 'solana' ? 'tag-solana' : chainId === 'base' ? 'tag-base' : '';
+    const symbol = tokenData.symbol || tokenData.name || '—';
+    const priceStr = formatPrice(tokenData.priceUsd);
+    const changeStr = (priceChange >= 0 ? '+' : '') + priceChange.toFixed(2) + '%';
+    const imgHtml = tokenData.imageUrl
+      ? `<img class="alert-banner-icon" src="${escapeHtml(tokenData.imageUrl)}" alt="" onerror="this.style.display='none'">`
+      : '<span class="alert-banner-icon"></span>';
+    const banner = document.createElement('div');
+    banner.className = cls;
+    banner.innerHTML = imgHtml + `
+      <div class="alert-banner-body">
+        <div class="alert-banner-header">
+          ${chainId ? `<span class="alert-banner-chain ${chainTagClass}">${escapeHtml(String(tokenData.chainId || '').toUpperCase())}</span>` : ''}
+          <span class="alert-banner-title">${escapeHtml(symbol)}</span>
+        </div>
+        <div class="alert-banner-row">
+          <span class="alert-banner-change">${escapeHtml(changeStr)}</span>
+          <span class="alert-banner-price">5m · ${priceStr}</span>
+        </div>
+      </div>
+      <button type="button" class="alert-banner-close" title="关闭">×</button>
+    `;
+    container.insertBefore(banner, container.firstChild);
+    const autoRemove = setTimeout(() => banner.remove(), 5000);
+    banner.querySelector('.alert-banner-close').onclick = () => {
+      clearTimeout(autoRemove);
+      banner.remove();
+    };
   }
 
   function clearAlertHighlight() {
@@ -518,10 +559,12 @@
   }
 
   async function refresh() {
+    if (_refreshing) return;
     const container = $('table-body');
     const emptyEl = $('empty-state');
     if (!container) return;
 
+    _refreshing = true;
     _cooldownMapCache = loadAlertCooldowns();
 
     if (list.length === 0) {
@@ -533,9 +576,11 @@
       container.innerHTML = '';
       if (emptyEl) emptyEl.classList.remove('hidden');
       clearAlertHighlight();
+      _refreshing = false;
       return;
     }
 
+    try {
     const results = {};
     await Promise.all(
       list.map(async (item) => {
@@ -594,7 +639,10 @@
         }
       }
     }
-    _cooldownMapCache = null;
+    } finally {
+      _cooldownMapCache = null;
+      _refreshing = false;
+    }
   }
 
   function checkAndTriggerAlerts(results, mapOverride) {
@@ -622,6 +670,7 @@
       if (alertHighlightTimer) clearTimeout(alertHighlightTimer);
       alertHighlightTimer = setTimeout(clearAlertHighlight, 30000);
       playAlertSound(settings, mode);
+      showNotificationBanner(data, m5Val);
       const title = direction === 'up' ? '🚀 5分钟暴涨' : '⚠️ 5分钟暴跌';
       const label = (data.name || data.symbol || '代币') + ' (' + (data.symbol || '') + ')';
       const body = direction === 'up'
@@ -803,7 +852,24 @@
       return Number.isFinite(v) && v > 0 ? Math.max(0.1, Math.min(1000, v)) : 5;
     }
 
+    let persistTimer = null;
     function persist() {
+      if (persistTimer) clearTimeout(persistTimer);
+      persistTimer = setTimeout(() => {
+        persistTimer = null;
+        const volNum = vol ? parseInt(vol.value, 10) : 70;
+        saveAlertSettings({
+          enabled: cb ? cb.checked : false,
+          sound: sel ? sel.value : 'chime',
+          volume: Number.isFinite(volNum) ? Math.max(0, Math.min(100, volNum)) : 70,
+          mode: loopBtn && loopBtn.classList.contains('active') ? 'loop' : 'single',
+          threshold: getValidThreshold(),
+        });
+      }, 150);
+    }
+    function persistNow() {
+      if (persistTimer) clearTimeout(persistTimer);
+      persistTimer = null;
       const volNum = vol ? parseInt(vol.value, 10) : 70;
       saveAlertSettings({
         enabled: cb ? cb.checked : false,
@@ -824,7 +890,7 @@
       thr.addEventListener('change', () => {
         const v = getValidThreshold();
         thr.value = v;
-        persist();
+        persistNow();
       });
     }
     if (sel) sel.addEventListener('change', persist);
@@ -834,14 +900,14 @@
       singleBtn.addEventListener('click', () => {
         document.querySelectorAll('.alert-mode-btn').forEach((b) => b.classList.remove('active'));
         singleBtn.classList.add('active');
-        persist();
+        persistNow();
       });
     }
     if (loopBtn) {
       loopBtn.addEventListener('click', () => {
         document.querySelectorAll('.alert-mode-btn').forEach((b) => b.classList.remove('active'));
         loopBtn.classList.add('active');
-        persist();
+        persistNow();
       });
     }
 
